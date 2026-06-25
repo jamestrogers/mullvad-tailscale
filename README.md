@@ -95,3 +95,26 @@ or the same command with long flag names:
 `mnf up --ram --zerotier --dns 1.1.1.1 --country ee`
 
 This connects to Mullvad's RAM-only servers (`-r`) in Estonia (`-c ee`) and uses Zerotier (`-z`). It also sets the MullvadVPN DNS to `1.1.1.1` .
+
+
+To create this persistently:
+sudo nano /etc/systemd/system/mnf.service
+
+Paste this in exactly:
+[Unit]
+Description=Mullvad + Tailscale with nftables exclusions
+After=network-online.target tailscaled.service mullvad-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/james/code/mullvad-tailscale/mnf up
+RemainAfterExit=yes
+ExecStop=/home/james/code/mullvad-tailscale/mnf down -a
+
+[Install]
+WantedBy=multi-user.target
+
+Then enable it:
+sudo systemctl daemon-reload
+sudo systemctl enable --now mnf.service
