@@ -11,6 +11,15 @@ EXCLUDE_COUNTRY_CODES=() # Country codes to avoid. Set to '' to allow all. Count
 # It is better to use the flags -f/--file and -t/--table to change this dynamically
 RULES_FILE="mullvad.rules"
 NFT_TABLENAME="mullvad-ts"
+# Tailscale policy-routing fix: route traffic destined to the Tailscale CGNAT
+# ranges via Tailscale's own routing table. This keeps forwarded/reply traffic
+# (e.g. replies from Docker-published services reachable over Tailscale) from
+# leaking into the Mullvad tunnel when Tailscale's connmark restore alters the
+# Mullvad bypass fwmark. Only used for Tailscale (not Zerotier).
+TS_ROUTE_TABLE=52                 # Tailscale's Linux routing table (default: 52)
+TS_RULE_PRIORITY=5205             # Must be a higher precedence (lower number) than Mullvad's ip rules
+TS_CGNAT_V4="100.64.0.0/10"       # Tailscale IPv4 CGNAT range
+TS_CGNAT_V6="fd7a:115c:a1e0::/48" # Tailscale IPv6 ULA range
 # Do not edit past this point.
 # ----------------------------
 
@@ -134,6 +143,21 @@ remove_nft_rules() {
   fi
 }
 
+# Remove any previously-added Tailscale bypass routing rules (idempotent).
+del_ts_bypass_routes() {
+  while sudo ip rule del priority "$TS_RULE_PRIORITY" 2>/dev/null; do :; done
+  while sudo ip -6 rule del priority "$TS_RULE_PRIORITY" 2>/dev/null; do :; done
+}
+
+# Route Tailscale-destined traffic via Tailscale's table so reply/forwarded
+# traffic does not leak into the Mullvad tunnel.
+add_ts_bypass_routes() {
+  printf "[INFO] Adding Tailscale bypass routing rules...\n"
+  del_ts_bypass_routes
+  prefix_output sudo ip rule add to "$TS_CGNAT_V4" lookup "$TS_ROUTE_TABLE" priority "$TS_RULE_PRIORITY"
+  prefix_output sudo ip -6 rule add to "$TS_CGNAT_V6" lookup "$TS_ROUTE_TABLE" priority "$TS_RULE_PRIORITY" || true
+}
+
 ## Action functions
 up() {
   # Bring down current connections
@@ -225,7 +249,7 @@ up() {
   if [[ "$zerotier" = false ]]; then
     printf "[INFO] Restarting tailscale connection...\n"
     prefix_output sudo tailscale down
-    prefix_output sudo tailscale up
+    prefix_output sudo tailscale up --accept-dns=false
   else
     printf "[INFO] Restarting zerotier-one connection...\n"
     prefix_output sudo systemctl start zerotier-one.service
@@ -254,6 +278,12 @@ up() {
   printf "[INFO] Connecting to server '%s'...\n" "$relay"
   prefix_output mullvad relay set location "$relay"
   prefix_output mullvad connect -w
+
+  # Keep replies to Tailscale peers (incl. forwarded Docker traffic) off the
+  # Mullvad tunnel. Tailscale only; Zerotier does not use TS_ROUTE_TABLE.
+  if [[ "$zerotier" = false ]]; then
+    add_ts_bypass_routes
+  fi
 
   if [[ "$zerotier" = true ]]; then
     printf "[INFO] Applying nft rules...\n"
@@ -300,6 +330,7 @@ down() {
   printf "[INFO] Disconnecting Mullvad...\n"
   prefix_output mullvad disconnect && printf "[INFO] Mullvad disconnected.\n" || printf "[WARN] Mullvad didn't disconnect properly.\n"
 
+  del_ts_bypass_routes
   remove_nft_rules
 }
 
